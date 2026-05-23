@@ -1,0 +1,105 @@
+name: Grant Databricks workspace access
+
+# One-off utility: uses the OIDC SP (which is workspace admin by virtue of having
+# created the workspace) to add an Entra user to the Databricks workspace and
+# put them in the workspace `admins` group. Manual only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      user_email:
+        description: Entra user UPN / email to add as workspace admin
+        required: true
+      workspace_url:
+        description: Databricks workspace URL (no scheme)
+        default: adb-7405619572968129.9.azuredatabricks.net
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  grant:
+    runs-on: ubuntu-latest
+    environment: azure
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Add user to workspace and promote to admin
+        env:
+          USER_EMAIL: ${{ inputs.user_email }}
+          WS_URL: ${{ inputs.workspace_url }}
+        run: |
+          set -euo pipefail
+          # AAD token for the Azure Databricks resource (well-known app id).
+          TOKEN=$(az account get-access-token \
+            --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d \
+            --query accessToken -o tsv)
+
+          API="https://${WS_URL}/api/2.0/preview/scim/v2"
+
+          # Create the user with workspace + SQL + cluster-create entitlements.
+          # 409 (already exists) is fine.
+          CREATE_BODY=$(cat <<JSON
+          {
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+            "userName": "${USER_EMAIL}",
+            "displayName": "${USER_EMAIL}",
+            "entitlements": [
+              {"value": "allow-cluster-create"},
+              {"value": "workspace-access"},
+              {"value": "databricks-sql-access"}
+            ]
+          }
+          JSON
+          )
+          CREATE_RESP=$(curl -sS -o /tmp/create.json -w "%{http_code}" \
+            -X POST "${API}/Users" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/scim+json" \
+            -d "${CREATE_BODY}")
+          echo "Create user HTTP ${CREATE_RESP}"
+          cat /tmp/create.json
+          echo
+
+          # Look up the user's SCIM id (works whether create succeeded or 409'd).
+          USER_ID=$(curl -sS \
+            "${API}/Users?filter=userName+eq+%22${USER_EMAIL}%22" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            | python -c "import sys,json; print(json.load(sys.stdin)['Resources'][0]['id'])")
+          echo "USER_ID=${USER_ID}"
+
+          # Find the 'admins' group id.
+          ADMIN_GID=$(curl -sS \
+            "${API}/Groups?filter=displayName+eq+%22admins%22" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            | python -c "import sys,json; print(json.load(sys.stdin)['Resources'][0]['id'])")
+          echo "ADMIN_GID=${ADMIN_GID}"
+
+          # Add to admins via PATCH (idempotent enough; ignore duplicate-member errors).
+          PATCH_BODY=$(cat <<JSON
+          {
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            "Operations": [{
+              "op": "add",
+              "path": "members",
+              "value": [{"value": "${USER_ID}"}]
+            }]
+          }
+          JSON
+          )
+          PATCH_CODE=$(curl -sS -o /tmp/patch.json -w "%{http_code}" \
+            -X PATCH "${API}/Groups/${ADMIN_GID}" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/scim+json" \
+            -d "${PATCH_BODY}")
+          echo "Add-to-admins HTTP ${PATCH_CODE}"
+          cat /tmp/patch.json
+          echo
+          echo "Done. ${USER_EMAIL} is a workspace admin on ${WS_URL}."
