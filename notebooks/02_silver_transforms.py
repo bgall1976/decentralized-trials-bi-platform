@@ -21,10 +21,15 @@ spark.sql(f"""CREATE TABLE IF NOT EXISTS {catalog}.silver.dim_patient
 
 # COMMAND ----------
 # Execute each statement in the versioned SQL files (kept in the repo as the source of truth).
-import os
+import os, re
+_COMMENT_RE = re.compile(r"--[^\n]*")
 silver_dir = f"{REPO_ROOT}/sql/silver"
 for f in sorted(os.listdir(silver_dir)):
     with open(f"{silver_dir}/{f}") as fh:
-        for stmt in [s for s in fh.read().split(";") if s.strip() and not s.strip().startswith("--")]:
-            spark.sql(stmt)
+        for stmt in fh.read().split(";"):
+            # Keep stmt as-is for Spark (it handles line comments), but only execute when there is
+            # real SQL left after stripping line comments — the previous startswith("--") check
+            # incorrectly dropped any statement that began with a comment.
+            if _COMMENT_RE.sub("", stmt).strip():
+                spark.sql(stmt)
 print("Silver build complete.")

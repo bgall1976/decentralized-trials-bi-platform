@@ -11,13 +11,16 @@ catalog = dbutils.widgets.get("catalog")
 _ctx_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
 REPO_ROOT = "/Workspace" + _ctx_path.rsplit("/notebooks/", 1)[0]
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.gold")
+import re
+_COMMENT_RE = re.compile(r"--[^\n]*")
 gold_dir = f"{REPO_ROOT}/sql/gold"
 for f in sorted(os.listdir(gold_dir)):
     if not f.endswith(".sql"):
         continue
     with open(f"{gold_dir}/{f}") as fh:
-        for stmt in [s for s in fh.read().split(";") if s.strip() and not s.strip().startswith("--")]:
-            spark.sql(stmt)
+        for stmt in fh.read().split(";"):
+            if _COMMENT_RE.sub("", stmt).strip():
+                spark.sql(stmt)
 
 # COMMAND ----------
 # MORE PREDICTABLE: run-rate enrollment forecast -> dtbi.gold.kpi_predictability_forecast
