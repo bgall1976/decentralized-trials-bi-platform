@@ -1,0 +1,53 @@
+// ---------- FASTER ----------
+Avg Days To First Patient =
+    AVERAGEX( VALUES(dim_study[study_id]),
+        CALCULATE( MIN(fact_patient_enrollment[enrolled_date]) ) - RELATED(dim_study[start_date]) )
+
+Avg Lead To Enrolled Days =
+    AVERAGE( fact_patient_enrollment[days_lead_to_enrolled] )
+
+Enrolled (Last 8 Weeks) =
+    CALCULATE( [Enrolled to Date],
+        DATESINPERIOD(dim_date[date_key], MAX(dim_date[date_key]), -56, DAY) )
+
+Weekly Enrollment Velocity = DIVIDE( [Enrolled (Last 8 Weeks)], 8 )
+
+// ---------- MORE PREDICTABLE ----------
+Enrolled to Date = CALCULATE( COUNTROWS(fact_patient_enrollment), fact_patient_enrollment[is_enrolled] = TRUE() )
+
+Pct To Target =
+    DIVIDE( [Enrolled to Date], SUM(dim_study[target_enrollment]) )
+
+Screen Fail Rate =
+    VAR Screened   = CALCULATE( COUNTROWS(fact_patient_enrollment), NOT ISBLANK(fact_patient_enrollment[screened_date]) )
+    VAR Randomized = CALCULATE( COUNTROWS(fact_patient_enrollment), NOT ISBLANK(fact_patient_enrollment[randomized_date]) )
+    RETURN DIVIDE( Screened - Randomized, Screened )
+
+Studies On Track =
+    CALCULATE( DISTINCTCOUNT(kpi_predictability_forecast[study_id]),
+               kpi_predictability_forecast[on_track] = TRUE() )
+
+Studies At Risk =
+    CALCULATE( DISTINCTCOUNT(kpi_predictability_forecast[study_id]),
+               kpi_predictability_forecast[on_track] = FALSE() )
+
+// ---------- MORE ACCESSIBLE ----------
+Pct Decentralized Enrollment =
+    VAR Decentralized =
+        CALCULATE( [Enrolled to Date], dim_site[is_decentralized] = TRUE() )
+    RETURN DIVIDE( Decentralized, [Enrolled to Date] )
+
+Pct Underrepresented Enrolled =
+    VAR Under =
+        CALCULATE( [Enrolled to Date],
+            NOT fact_patient_enrollment[race_ethnicity] IN { "White" } )
+    RETURN DIVIDE( Under, [Enrolled to Date] )
+
+// ---------- EFFICIENCY (cross-domain) ----------
+Total Marketing Spend = SUM( fact_marketing_daily[spend_usd] )
+Total Site Cost       = SUM( fact_site_financials[operating_cost_usd] )
+
+Cost Per Enrolled Patient =
+    DIVIDE( [Total Marketing Spend] + [Total Site Cost], [Enrolled to Date] )
+
+Marketing CAC Per Enrolled = DIVIDE( [Total Marketing Spend], [Enrolled to Date] )

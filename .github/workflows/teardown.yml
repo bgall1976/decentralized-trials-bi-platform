@@ -1,0 +1,40 @@
+name: Teardown Azure (OIDC)
+
+# Manual only, with a typed confirmation, so you can stop billing from the Actions tab.
+on:
+  workflow_dispatch:
+    inputs:
+      resource_prefix:
+        description: Resource name prefix used at deploy
+        default: dtbi
+        required: true
+      confirm:
+        description: Type the resource group name (<prefix>-rg) to confirm deletion
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  teardown:
+    runs-on: ubuntu-latest
+    environment: azure
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Delete resource group
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            RG="${{ inputs.resource_prefix }}-rg"
+            if [ "${{ inputs.confirm }}" != "$RG" ]; then
+              echo "Confirmation '${{ inputs.confirm }}' does not match '$RG'. Aborting."; exit 1
+            fi
+            az group delete --name "$RG" --yes
+            echo "Deleted $RG. Verify the Databricks managed RG (<prefix>-dbw-managed) is gone too."

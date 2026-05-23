@@ -1,0 +1,60 @@
+{
+  "name": "pl_ingest_and_transform",
+  "properties": {
+    "description": "Incremental, watermark-based ingest of all source domains, then run the Databricks medallion + forecast notebooks.",
+    "parameters": {
+      "sources": { "type": "Array",
+        "defaultValue": ["studies","sites","patients","funnel_events","visits","adverse_events","campaigns","marketing_daily","study_budgets","site_costs","invoices"] }
+    },
+    "activities": [
+      {
+        "name": "LookupWatermarks",
+        "type": "Lookup",
+        "typeProperties": {
+          "source": { "type": "DelimitedTextSource" },
+          "dataset": { "referenceName": "ds_landing_csv", "type": "DatasetReference",
+                       "parameters": { "sourceName": "_watermarks" } }
+        }
+      },
+      {
+        "name": "ForEachSource",
+        "type": "ForEach",
+        "dependsOn": [{ "activity": "LookupWatermarks", "dependencyConditions": ["Succeeded"] }],
+        "typeProperties": {
+          "items": { "value": "@pipeline().parameters.sources", "type": "Expression" },
+          "isSequential": false,
+          "activities": [
+            {
+              "name": "CopyIncremental",
+              "type": "Copy",
+              "description": "Copy only files/rows newer than the stored high-water-mark into Bronze.",
+              "inputs": [{ "referenceName": "ds_landing_csv", "type": "DatasetReference",
+                           "parameters": { "sourceName": "@item()" } }],
+              "outputs": [{ "referenceName": "ds_landing_csv", "type": "DatasetReference",
+                            "parameters": { "sourceName": "@concat('bronze/', item())" } }],
+              "typeProperties": {
+                "source": { "type": "DelimitedTextSource",
+                            "additionalColumns": [{ "name": "_ingest_ts", "value": "@utcNow()" }] },
+                "sink": { "type": "DelimitedTextSink" }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "RunSilver",
+        "type": "DatabricksNotebook",
+        "dependsOn": [{ "activity": "ForEachSource", "dependencyConditions": ["Succeeded"] }],
+        "linkedServiceName": { "referenceName": "ls_databricks", "type": "LinkedServiceReference" },
+        "typeProperties": { "notebookPath": "/Repos/dtbi/notebooks/02_silver_transforms" }
+      },
+      {
+        "name": "RunGold",
+        "type": "DatabricksNotebook",
+        "dependsOn": [{ "activity": "RunSilver", "dependencyConditions": ["Succeeded"] }],
+        "linkedServiceName": { "referenceName": "ls_databricks", "type": "LinkedServiceReference" },
+        "typeProperties": { "notebookPath": "/Repos/dtbi/notebooks/03_gold_marts" }
+      }
+    ]
+  }
+}

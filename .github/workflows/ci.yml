@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  pipeline-and-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run local medallion pipeline (synthetic data)
+        run: |
+          python -m src.generators.generate_all
+          python -m src.pipelines.local_run
+      - name: Data-quality tests
+        run: pytest -q
+      - name: Lint SQL
+        run: sqlfluff lint sql/ --dialect databricks || true
+
+  bicep-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Bicep (compile + lint, no Azure login needed)
+        run: |
+          az bicep install
+          az bicep build --file infra/main.bicep

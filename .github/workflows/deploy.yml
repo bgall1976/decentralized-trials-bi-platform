@@ -1,0 +1,56 @@
+name: Deploy to Azure (OIDC)
+
+# Manual only — protects a personal subscription from accidental/per-push spend.
+on:
+  workflow_dispatch:
+    inputs:
+      location:
+        description: Azure region
+        default: eastus
+        required: true
+      resource_prefix:
+        description: Resource name prefix (3-8 lowercase chars)
+        default: dtbi
+        required: true
+
+permissions:
+  id-token: write      # required for OIDC federated login (no client secret stored)
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: azure   # add a required reviewer on this environment in repo settings for an approval gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC, secretless)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate Bicep
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az deployment sub validate \
+              --location "${{ inputs.location }}" \
+              --template-file infra/main.bicep \
+              --parameters location="${{ inputs.location }}" \
+                           resourcePrefix="${{ inputs.resource_prefix }}" \
+                           adminObjectId="${{ secrets.AZURE_DEPLOYER_OBJECT_ID }}"
+
+      - name: Deploy
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az deployment sub create \
+              --name dtbi-deploy \
+              --location "${{ inputs.location }}" \
+              --template-file infra/main.bicep \
+              --parameters location="${{ inputs.location }}" \
+                           resourcePrefix="${{ inputs.resource_prefix }}" \
+                           adminObjectId="${{ secrets.AZURE_DEPLOYER_OBJECT_ID }}"
+            echo "Deployed. Run scripts/post_deploy.sh locally to load synthetic data + store the Databricks PAT."

@@ -1,0 +1,8 @@
+pandas>=2.0
+duckdb>=1.0
+pyarrow>=14.0
+Faker>=24.0
+streamlit>=1.30
+plotly>=5.18
+pytest>=8.0
+sqlfluff>=3.0

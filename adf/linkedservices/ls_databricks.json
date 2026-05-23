@@ -1,0 +1,21 @@
+{
+  "name": "ls_databricks",
+  "properties": {
+    "type": "AzureDatabricks",
+    "description": "Databricks workspace. PAT pulled from Key Vault at runtime, never stored in ADF.",
+    "typeProperties": {
+      "domain": "https://@{linkedService().workspaceUrl}",
+      "accessToken": {
+        "type": "AzureKeyVaultSecret",
+        "store": { "referenceName": "ls_keyvault", "type": "LinkedServiceReference" },
+        "secretName": "databricks-pat"
+      },
+      "newClusterNodeType": "Standard_DS3_v2",
+      "newClusterNumOfWorker": "1",
+      "newClusterVersion": "14.3.x-scala2.12",
+      "newClusterInitScripts": [],
+      "clusterOption": "Fixed"
+    },
+    "parameters": { "workspaceUrl": { "type": "String" } }
+  }
+}

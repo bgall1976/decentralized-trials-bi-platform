@@ -1,0 +1,11 @@
+{
+  "name": "ls_adls",
+  "properties": {
+    "type": "AzureBlobFS",
+    "description": "ADLS Gen2 lake. Auth via ADF system-assigned managed identity (no keys).",
+    "typeProperties": {
+      "url": "https://@{linkedService().storageAccount}.dfs.core.windows.net"
+    },
+    "parameters": { "storageAccount": { "type": "String" } }
+  }
+}

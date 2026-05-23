@@ -1,0 +1,16 @@
+{
+  "name": "ds_landing_csv",
+  "properties": {
+    "type": "DelimitedText",
+    "linkedServiceName": { "referenceName": "ls_adls", "type": "LinkedServiceReference" },
+    "parameters": { "sourceName": { "type": "String" } },
+    "typeProperties": {
+      "location": {
+        "type": "AzureBlobFSLocation",
+        "fileSystem": "landing",
+        "folderPath": "@dataset().sourceName"
+      },
+      "columnDelimiter": ",", "firstRowAsHeader": true
+    }
+  }
+}
