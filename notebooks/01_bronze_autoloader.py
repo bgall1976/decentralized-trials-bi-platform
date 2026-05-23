@@ -16,6 +16,8 @@ SOURCES = ["studies", "sites", "patients", "funnel_events", "visits", "adverse_e
 # COMMAND ----------
 from pyspark.sql import functions as F
 
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.bronze")
+
 for src in SOURCES:
     (spark.readStream.format("cloudFiles")
         .option("cloudFiles.format", "csv")

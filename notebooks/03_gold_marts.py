@@ -6,12 +6,16 @@
 
 # COMMAND ----------
 import os
-catalog = "dtbi"
+dbutils.widgets.text("catalog", "dtbi")
+catalog = dbutils.widgets.get("catalog")
+_ctx_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
+REPO_ROOT = "/Workspace" + _ctx_path.rsplit("/notebooks/", 1)[0]
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.gold")
-for f in sorted(os.listdir("/Workspace/Repos/dtbi/sql/gold")):
+gold_dir = f"{REPO_ROOT}/sql/gold"
+for f in sorted(os.listdir(gold_dir)):
     if not f.endswith(".sql"):
         continue
-    with open(f"/Workspace/Repos/dtbi/sql/gold/{f}") as fh:
+    with open(f"{gold_dir}/{f}") as fh:
         for stmt in [s for s in fh.read().split(";") if s.strip() and not s.strip().startswith("--")]:
             spark.sql(stmt)
 
