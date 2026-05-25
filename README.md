@@ -23,11 +23,12 @@ dashboard.
 2. [Architecture](#architecture)
 3. [Quick start (local mode — no Azure)](#quick-start-local-mode--no-azure-required)
 4. [Deploy to Azure](#deploy-to-azure-real-subscription)
-5. [End-to-end data walkthrough (manual, step by step)](#end-to-end-data-walkthrough-manual-step-by-step)
-6. [Tracing the path of the data with SQL](#tracing-the-path-of-the-data-with-sql)
-7. [Repository layout](#repository-layout)
-8. [Troubleshooting](#troubleshooting)
-9. [Cost & teardown](#cost--teardown)
+5. [Code execution sequence (CSV → Gold fact)](#code-execution-sequence-csv--gold-fact)
+6. [End-to-end data walkthrough (manual, step by step)](#end-to-end-data-walkthrough-manual-step-by-step)
+7. [Tracing the path of the data with SQL](#tracing-the-path-of-the-data-with-sql)
+8. [Repository layout](#repository-layout)
+9. [Troubleshooting](#troubleshooting)
+10. [Cost & teardown](#cost--teardown)
 
 ---
 
@@ -133,6 +134,45 @@ cp infra/main.parameters.example.bicepparam infra/main.parameters.bicepparam   #
 
 You can also deploy from GitHub Actions using **OIDC (no stored secrets)** — see [`docs/CICD_OIDC.md`](docs/CICD_OIDC.md). The Subscription ID is supplied at deploy time and never committed. Cost is controlled with small
 SKUs and an auto-terminating Databricks cluster — see [`docs/COST.md`](docs/COST.md).
+
+---
+
+## Code execution sequence (CSV → Gold fact)
+
+Exact order in which each piece of code runs as one row travels from a CSV in ADLS to the Gold fact
+table. Bronze→Silver→Gold is driven by the three notebooks; the SQL files are executed in
+**filename-sorted order** inside the Silver/Gold notebooks (`os.listdir` + `sorted`).
+
+| # | File (line refs) | What runs | Reads | Writes |
+|---|---|---|---|---|
+| 0 | `src/generators/generate_all.py` (`main`, L195–212) | Builds 11 deterministic CSVs (`SEED=42`) into `data/landing/` | — | `data/landing/*.csv` |
+| 1 | shell: `az storage blob upload-batch ... --pattern "*.csv"` | Uploads CSVs to ADLS | `data/landing/*.csv` | `abfss://landing@<SA>/*.csv` |
+| 2 | shell: `az storage blob copy start ... <src>/<src>.csv` (loop over 11 sources) | Per-source subfolders required by Auto Loader | `landing/<src>.csv` | `landing/<src>/<src>.csv` |
+| 3 | `notebooks/01_bronze_autoloader.py` L8–11 | Read widgets `landing_path`, `catalog` | — | — |
+| 4 | same, L13–14 | Define `SOURCES = [studies, sites, patients, funnel_events, visits, adverse_events, campaigns, marketing_daily, study_budgets, site_costs, invoices]` | — | — |
+| 5 | same, L19 | `CREATE SCHEMA IF NOT EXISTS dtbi.bronze` | — | UC schema |
+| 6 | same, L21–32 (loop ×11) | For each `src`: Auto Loader `readStream` CSV → add `_ingest_ts`+`_source_file` → `writeStream` Delta with checkpoint, `trigger(availableNow=True)` | `landing/<src>/`, `landing/_schema/<src>/`, `landing/_checkpoints/<src>/` | `dtbi.bronze.<src>` Delta table (×11) |
+| 7 | `notebooks/02_silver_transforms.py` L8–13 | Read `catalog` widget; derive `REPO_ROOT` from notebook path | — | — |
+| 8 | same, L14–20 | Create `dtbi.silver` schema, `_load_watermark` table, empty `dim_patient` (typed) | — | `dtbi.silver.{_load_watermark, dim_patient}` |
+| 9 | `sql/silver/01_dim_patient_scd2.sql` stmt 1 (L5–24) — executed by notebook 02 L27–34 | `MERGE INTO dtbi.silver.dim_patient` from `dtbi.bronze.patients` filtered by watermark — closes changed rows (SCD2 step 1) + inserts brand-new patients | `dtbi.bronze.patients`, `dtbi.silver.{dim_patient,_load_watermark}` | `dtbi.silver.dim_patient` |
+| 10 | same file, stmt 2 (L27–34) | `INSERT INTO dim_patient` — opens the new "current" SCD2 row for any patient just closed (SCD2 step 2) | `dtbi.bronze.patients`, `dtbi.silver.dim_patient` | `dtbi.silver.dim_patient` |
+| 11 | same file, stmt 3 (L37–41) | `MERGE` advance `_load_watermark` for `dim_patient` to `max(_ingest_ts)` | `dtbi.bronze.patients` | `dtbi.silver._load_watermark` |
+| 12 | `sql/silver/02_conform_funnel.sql` stmt 1 (L2–4) | `CREATE TABLE IF NOT EXISTS dtbi.silver.funnel_events` | — | `dtbi.silver.funnel_events` |
+| 13 | same file, stmt 2 (L6–17) | Dedup bronze funnel events to first occurrence per `(patient_id, stage)` via `ROW_NUMBER`, watermark-filtered, then `MERGE` into silver | `dtbi.bronze.funnel_events`, `dtbi.silver._load_watermark` | `dtbi.silver.funnel_events` |
+| 14 | `notebooks/03_gold_marts.py` L8–13 | Read `catalog` widget, derive `REPO_ROOT`, `CREATE SCHEMA dtbi.gold` | — | UC schema |
+| 15 | `sql/gold/01_dimensions.sql` stmt 1 (L4–6) — executed by notebook 03 L17–23 | `CREATE OR REPLACE VIEW dtbi.gold.dim_patient` (SCD2 current-version projection of silver dim_patient) | `dtbi.silver.dim_patient` | `dtbi.gold.dim_patient` (VIEW) |
+| 16 | same file, stmt 2 (L8–12) | `CREATE OR REPLACE TABLE dtbi.gold.dim_study` with explicit casts + `planned_end_date = start_date + planned_duration_days` | `dtbi.bronze.studies` | `dtbi.gold.dim_study` |
+| 17 | same file, stmt 3 (L13–15) | `CREATE OR REPLACE TABLE dtbi.gold.dim_site` (typed cast) | `dtbi.bronze.sites` | `dtbi.gold.dim_site` |
+| 18 | same file, stmt 4 (L16–17) | `CREATE OR REPLACE TABLE dtbi.gold.dim_date` (day grain 2024-01-01 → 2026-12-31) | — | `dtbi.gold.dim_date` |
+| 19 | `sql/gold/02_fact_patient_enrollment.sql` (one statement) | Pivot funnel: `min(CASE WHEN stage=...)` per `(patient,study)` → milestone columns, join `dim_patient`, compute `screen_failed`, `is_enrolled`, `days_lead_to_enrolled`, `days_screened_to_randomized` | `dtbi.silver.funnel_events`, `dtbi.gold.dim_patient` | **`dtbi.gold.fact_patient_enrollment`** ← final fact table |
+| 20 | `sql/gold/10_kpi_speed.sql` (one statement) | `CREATE VIEW kpi_speed_study` — first-enrollment date, days-to-first-patient, avg cycle times per study (Faster) | `dtbi.gold.{dim_study,fact_patient_enrollment}` | `dtbi.gold.kpi_speed_study` (VIEW) |
+| 21 | `sql/gold/11_kpi_predictability.sql` (one statement) | `CREATE VIEW kpi_predictability_conversion` — leads / screened / randomized / enrolled / screen-fail % per study | `dtbi.gold.fact_patient_enrollment` | `dtbi.gold.kpi_predictability_conversion` (VIEW) |
+| 22 | `sql/gold/12_kpi_accessibility.sql` stmts 1–2 (L2–12) | `CREATE VIEW kpi_accessibility_diversity` (race/sex % per study) + `kpi_accessibility_reach` (site_type/region) | `dtbi.gold.{fact_patient_enrollment,dim_site}` | `dtbi.gold.{kpi_accessibility_diversity, kpi_accessibility_reach}` (VIEWs) |
+| 23 | `notebooks/03_gold_marts.py` L27–42 (PySpark cell) | Run-rate forecast: 8-week velocity → `projected_completion_date` vs `planned_end_date` → `on_track` | `dtbi.gold.{fact_patient_enrollment,dim_study}` | `dtbi.gold.kpi_predictability_forecast` |
+| 24 (optional) | `notebooks/04_unity_catalog_governance.py` | Column mask on `silver.dim_patient.patient_id` + RLS by site + `GRANT` Gold to `bi_team` | UC catalog | UC policies |
+
+Local-mode equivalent (no Azure): `src/pipelines/local_run.py` runs steps 0 → bronze → silver →
+gold → forecast against DuckDB + Parquet in `data/{bronze,silver,gold}/` (same column shapes).
 
 ---
 
